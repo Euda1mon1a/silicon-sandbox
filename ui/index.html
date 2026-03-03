@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SiliconSandbox</title>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <style>
+    :root {
+      --bg: #0d1117; --bg2: #161b22; --bg3: #21262d; --border: #30363d;
+      --text: #c9d1d9; --text2: #8b949e; --accent: #58a6ff; --green: #3fb950;
+      --red: #f85149; --yellow: #d29922; --purple: #bc8cff;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif;
+           background: var(--bg); color: var(--text); display: flex; height: 100vh; overflow: hidden; }
+
+    /* Sidebar */
+    .sidebar { width: 260px; background: var(--bg2); border-right: 1px solid var(--border);
+               display: flex; flex-direction: column; flex-shrink: 0; }
+    .sidebar-header { padding: 16px; border-bottom: 1px solid var(--border); }
+    .sidebar-header h1 { font-size: 16px; font-weight: 600; }
+    .sidebar-header span { font-size: 11px; color: var(--text2); }
+    .sidebar-nav { padding: 8px; }
+    .sidebar-nav button { display: block; width: 100%; text-align: left; padding: 8px 12px;
+      background: none; border: none; color: var(--text2); cursor: pointer; border-radius: 6px;
+      font-size: 13px; margin-bottom: 2px; }
+    .sidebar-nav button:hover, .sidebar-nav button.active { background: var(--bg3); color: var(--text); }
+    .task-list { flex: 1; overflow-y: auto; padding: 8px; }
+    .task-item { padding: 8px 12px; border-radius: 6px; cursor: pointer; margin-bottom: 4px;
+      font-size: 12px; color: var(--text2); }
+    .task-item:hover { background: var(--bg3); }
+    .task-item.active { background: var(--bg3); color: var(--text); }
+    .task-item .status { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+    .status-completed { background: var(--green); }
+    .status-running { background: var(--yellow); }
+    .status-failed { background: var(--red); }
+    .status-pending { background: var(--text2); }
+
+    /* Main */
+    .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+    .topbar { padding: 12px 20px; border-bottom: 1px solid var(--border); display: flex;
+      align-items: center; justify-content: space-between; }
+    .topbar h2 { font-size: 14px; font-weight: 500; }
+    .status-badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; }
+    .status-badge.ok { background: rgba(63,185,80,0.15); color: var(--green); }
+    .status-badge.degraded { background: rgba(210,153,34,0.15); color: var(--yellow); }
+    .content { flex: 1; overflow-y: auto; padding: 20px; }
+
+    /* Task Input */
+    .task-input { padding: 16px 20px; border-top: 1px solid var(--border); }
+    .task-input form { display: flex; gap: 8px; }
+    .task-input textarea { flex: 1; background: var(--bg3); border: 1px solid var(--border);
+      color: var(--text); padding: 10px 12px; border-radius: 8px; font-size: 13px;
+      resize: none; height: 42px; font-family: inherit; }
+    .task-input textarea:focus { outline: none; border-color: var(--accent); }
+    .task-input button { background: var(--accent); color: #fff; border: none; padding: 0 20px;
+      border-radius: 8px; font-size: 13px; font-weight: 500; cursor: pointer; }
+    .task-input button:hover { opacity: 0.9; }
+    .task-input button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* DAG View */
+    .dag-container { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 16px; }
+    .subtask-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
+      padding: 12px 16px; min-width: 220px; max-width: 320px; flex: 1; }
+    .subtask-card.completed { border-color: var(--green); }
+    .subtask-card.running { border-color: var(--yellow); }
+    .subtask-card.failed { border-color: var(--red); }
+    .subtask-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+    .subtask-id { font-size: 11px; color: var(--text2); font-family: monospace; }
+    .subtask-type { font-size: 10px; padding: 1px 6px; border-radius: 4px; background: var(--bg3); color: var(--purple); }
+    .subtask-desc { font-size: 12px; line-height: 1.4; margin-bottom: 8px; }
+    .subtask-meta { display: flex; gap: 12px; font-size: 11px; color: var(--text2); }
+    .subtask-output { margin-top: 8px; padding: 8px; background: var(--bg); border-radius: 4px;
+      font-size: 11px; font-family: 'SF Mono', monospace; max-height: 120px; overflow-y: auto;
+      white-space: pre-wrap; word-break: break-all; }
+
+    /* Sandbox Monitor */
+    .sandbox-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .sandbox-table th { text-align: left; padding: 8px 12px; color: var(--text2); font-weight: 500;
+      border-bottom: 1px solid var(--border); font-size: 11px; text-transform: uppercase; }
+    .sandbox-table td { padding: 8px 12px; border-bottom: 1px solid var(--border); }
+    .tier-badge { font-size: 11px; padding: 1px 6px; border-radius: 4px; font-weight: 600; }
+    .tier-A { background: rgba(88,166,255,0.15); color: var(--accent); }
+    .tier-B { background: rgba(188,140,255,0.15); color: var(--purple); }
+    .tier-C { background: rgba(63,185,80,0.15); color: var(--green); }
+
+    /* Memory */
+    .memory-search { display: flex; gap: 8px; margin-bottom: 16px; }
+    .memory-search input { flex: 1; background: var(--bg3); border: 1px solid var(--border);
+      color: var(--text); padding: 8px 12px; border-radius: 6px; font-size: 13px; }
+    .memory-search input:focus { outline: none; border-color: var(--accent); }
+    .memory-result { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+      padding: 12px; margin-bottom: 8px; }
+    .memory-result .score { font-size: 11px; color: var(--accent); }
+    .memory-result .content { font-size: 13px; margin-top: 4px; }
+
+    /* Results */
+    .result-panel { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
+      padding: 16px; margin-top: 16px; }
+    .result-panel h3 { font-size: 13px; font-weight: 600; margin-bottom: 8px; }
+    .result-panel .md { font-size: 13px; line-height: 1.6; }
+    .result-panel .md code { background: var(--bg3); padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+    .result-panel .md pre { background: var(--bg); padding: 12px; border-radius: 6px; overflow-x: auto; margin: 8px 0; }
+    .result-panel .md pre code { background: none; padding: 0; }
+
+    /* Event log */
+    .event-log { max-height: 200px; overflow-y: auto; font-family: 'SF Mono', monospace;
+      font-size: 11px; color: var(--text2); background: var(--bg); border-radius: 6px;
+      padding: 8px; margin-top: 12px; }
+    .event-log .ev { padding: 2px 0; }
+    .event-log .ev-time { color: var(--text2); }
+    .event-log .ev-type { color: var(--accent); }
+
+    /* Kill button */
+    .btn-kill { background: rgba(248,81,73,0.15); color: var(--red); border: 1px solid rgba(248,81,73,0.3);
+      padding: 4px 10px; border-radius: 4px; font-size: 11px; cursor: pointer; }
+    .btn-kill:hover { background: rgba(248,81,73,0.3); }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--bg3); border-radius: 3px; }
+  </style>
+</head>
+<body x-data="app()" x-init="init()">
+
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <div class="sidebar-header">
+      <h1>SiliconSandbox</h1>
+      <span>v0.2.0</span>
+    </div>
+    <div class="sidebar-nav">
+      <button :class="{ active: view === 'tasks' }" @click="view = 'tasks'">Tasks</button>
+      <button :class="{ active: view === 'sandboxes' }" @click="view = 'sandboxes'; fetchSandboxes()">Sandboxes</button>
+      <button :class="{ active: view === 'memory' }" @click="view = 'memory'; fetchMemoryStats()">Memory</button>
+    </div>
+    <div class="task-list" x-show="view === 'tasks'">
+      <template x-for="task in tasks" :key="task.id">
+        <div class="task-item" :class="{ active: currentTask?.id === task.id }" @click="selectTask(task.id)">
+          <span class="status" :class="'status-' + task.status"></span>
+          <span x-text="task.goal?.substring(0, 40) + (task.goal?.length > 40 ? '...' : '')"></span>
+        </div>
+      </template>
+      <div x-show="tasks.length === 0" style="padding: 12px; font-size: 12px; color: var(--text2);">
+        No tasks yet. Submit a goal below.
+      </div>
+    </div>
+  </div>
+
+  <!-- Main -->
+  <div class="main">
+    <div class="topbar">
+      <h2 x-text="viewTitle()"></h2>
+      <span class="status-badge" :class="healthStatus" x-text="healthStatus"></span>
+    </div>
+
+    <div class="content">
+
+      <!-- Tasks View -->
+      <template x-if="view === 'tasks'">
+        <div>
+          <template x-if="currentTask">
+            <div>
+              <h3 style="font-size: 15px; margin-bottom: 4px;" x-text="currentTask.goal"></h3>
+              <div style="font-size: 12px; color: var(--text2); margin-bottom: 16px;">
+                Status: <span :style="'color: var(--' + statusColor(currentTask.status) + ')'" x-text="currentTask.status"></span>
+                &middot; <span x-text="currentTask.subtasks?.length || 0"></span> subtasks
+              </div>
+
+              <!-- DAG -->
+              <div class="dag-container">
+                <template x-for="st in currentTask.subtasks || []" :key="st.id">
+                  <div class="subtask-card" :class="st.status">
+                    <div class="subtask-header">
+                      <span class="subtask-id" x-text="st.id"></span>
+                      <span class="subtask-type" x-text="st.type"></span>
+                    </div>
+                    <div class="subtask-desc" x-text="st.description"></div>
+                    <div class="subtask-meta">
+                      <span x-show="st.model">Model: <span x-text="st.model"></span></span>
+                      <span x-show="st.sandbox_tier">Tier <span x-text="st.sandbox_tier"></span></span>
+                      <span x-show="st.elapsed_seconds" x-text="st.elapsed_seconds?.toFixed(1) + 's'"></span>
+                    </div>
+                    <div class="subtask-output" x-show="st.output" x-text="st.output?.substring(0, 500)"></div>
+                    <div class="subtask-output" x-show="st.error" style="color: var(--red)" x-text="st.error"></div>
+                  </div>
+                </template>
+              </div>
+
+              <!-- Result -->
+              <div class="result-panel" x-show="currentTask.status === 'completed'">
+                <h3>Result</h3>
+                <div class="md" x-html="renderResult()"></div>
+              </div>
+
+              <!-- Events -->
+              <div class="event-log" x-show="events.length > 0">
+                <template x-for="ev in events" :key="ev.ts">
+                  <div class="ev">
+                    <span class="ev-time" x-text="ev.ts"></span>
+                    <span class="ev-type" x-text="ev.type"></span>
+                    <span x-text="ev.msg"></span>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </template>
+
+          <template x-if="!currentTask">
+            <div style="text-align: center; padding: 60px 20px; color: var(--text2);">
+              <div style="font-size: 32px; margin-bottom: 12px;">&#9881;</div>
+              <div style="font-size: 14px;">Submit a task below to get started</div>
+              <div style="font-size: 12px; margin-top: 4px;">Tasks are decomposed into subtask DAGs and executed in sandboxes</div>
+            </div>
+          </template>
+        </div>
+      </template>
+
+      <!-- Sandboxes View -->
+      <template x-if="view === 'sandboxes'">
+        <div>
+          <div style="margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center;">
+            <span style="font-size: 12px; color: var(--text2);" x-text="sandboxes.length + ' active'"></span>
+            <button @click="fetchSandboxes()" style="background: var(--bg3); border: 1px solid var(--border);
+              color: var(--text2); padding: 4px 10px; border-radius: 4px; font-size: 11px; cursor: pointer;">Refresh</button>
+          </div>
+          <table class="sandbox-table">
+            <thead>
+              <tr><th>ID</th><th>Tier</th><th>Status</th><th>Command</th><th></th></tr>
+            </thead>
+            <tbody>
+              <template x-for="sb in sandboxes" :key="sb.sandbox_id">
+                <tr>
+                  <td style="font-family: monospace; font-size: 12px;" x-text="sb.sandbox_id?.substring(0, 8)"></td>
+                  <td><span class="tier-badge" :class="'tier-' + sb.tier" x-text="sb.tier"></span></td>
+                  <td x-text="sb.status"></td>
+                  <td style="font-size: 12px; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;"
+                      x-text="sb.command?.substring(0, 60)"></td>
+                  <td>
+                    <button class="btn-kill" x-show="sb.status === 'running'" @click="killSandbox(sb.sandbox_id)">Kill</button>
+                  </td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+          <div x-show="sandboxes.length === 0" style="text-align: center; padding: 40px; color: var(--text2); font-size: 13px;">
+            No active sandboxes
+          </div>
+        </div>
+      </template>
+
+      <!-- Memory View -->
+      <template x-if="view === 'memory'">
+        <div>
+          <div class="memory-search">
+            <input type="text" placeholder="Search memory..." x-model="memoryQuery"
+                   @keydown.enter="searchMemory()">
+            <button @click="searchMemory()"
+              style="background: var(--accent); color: #fff; border: none; padding: 8px 16px;
+              border-radius: 6px; font-size: 13px; cursor: pointer;">Search</button>
+          </div>
+          <div x-show="memoryStats" style="font-size: 12px; color: var(--text2); margin-bottom: 12px;">
+            <span x-text="memoryStats?.total_memories || 0"></span> memories &middot;
+            <span x-text="memoryStats?.total_tasks || 0"></span> tasks logged
+          </div>
+          <template x-for="(r, i) in memoryResults" :key="i">
+            <div class="memory-result">
+              <span class="score" x-show="r.score" x-text="'Score: ' + r.score?.toFixed(3)"></span>
+              <div class="content" x-text="r.content"></div>
+            </div>
+          </template>
+        </div>
+      </template>
+    </div>
+
+    <!-- Task Input (always visible) -->
+    <div class="task-input" x-show="view === 'tasks'">
+      <form @submit.prevent="submitTask()">
+        <textarea x-model="taskGoal" placeholder="Describe your task..." @keydown.meta.enter="submitTask()"
+                  :disabled="submitting"></textarea>
+        <button type="submit" :disabled="!taskGoal.trim() || submitting" x-text="submitting ? 'Running...' : 'Run'"></button>
+      </form>
+    </div>
+  </div>
+
+<script>
+function app() {
+  return {
+    view: 'tasks',
+    healthStatus: 'ok',
+    tasks: [],
+    currentTask: null,
+    events: [],
+    sandboxes: [],
+    memoryQuery: '',
+    memoryResults: [],
+    memoryStats: null,
+    taskGoal: '',
+    submitting: false,
+    ws: null,
+
+    async init() {
+      await this.checkHealth();
+      await this.fetchTasks();
+      this.connectWS();
+      setInterval(() => this.checkHealth(), 30000);
+      setInterval(() => { if (this.view === 'tasks') this.fetchTasks(); }, 10000);
+    },
+
+    viewTitle() {
+      return { tasks: 'Tasks', sandboxes: 'Sandbox Monitor', memory: 'Memory Store' }[this.view] || '';
+    },
+
+    statusColor(status) {
+      return { completed: 'green', running: 'yellow', failed: 'red', pending: 'text2',
+               planning: 'yellow', cancelled: 'text2' }[status] || 'text2';
+    },
+
+    async checkHealth() {
+      try {
+        const r = await fetch('/health');
+        const d = await r.json();
+        this.healthStatus = d.status;
+      } catch { this.healthStatus = 'degraded'; }
+    },
+
+    async fetchTasks() {
+      try {
+        const r = await fetch('/api/orchestrator/tasks');
+        if (r.ok) {
+          const d = await r.json();
+          this.tasks = d.tasks || d || [];
+        }
+      } catch {}
+    },
+
+    async selectTask(id) {
+      try {
+        const r = await fetch(`/api/orchestrator/tasks/${id}`);
+        if (r.ok) this.currentTask = await r.json();
+      } catch {}
+    },
+
+    async submitTask() {
+      if (!this.taskGoal.trim() || this.submitting) return;
+      this.submitting = true;
+      this.events = [];
+      try {
+        const r = await fetch('/api/orchestrator/tasks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ goal: this.taskGoal }),
+        });
+        if (r.ok) {
+          const d = await r.json();
+          this.taskGoal = '';
+          await this.fetchTasks();
+          if (d.task_id) await this.selectTask(d.task_id);
+          // Poll for completion
+          this.pollTask(d.task_id);
+        }
+      } catch (e) {
+        this.events.push({ ts: new Date().toLocaleTimeString(), type: 'error', msg: e.message });
+      }
+      this.submitting = false;
+    },
+
+    async pollTask(id) {
+      if (!id) return;
+      const poll = setInterval(async () => {
+        try {
+          const r = await fetch(`/api/orchestrator/tasks/${id}`);
+          if (r.ok) {
+            const d = await r.json();
+            if (this.currentTask?.id === id) this.currentTask = d;
+            // Update in list
+            const idx = this.tasks.findIndex(t => t.id === id);
+            if (idx >= 0) this.tasks[idx] = d;
+            if (['completed', 'failed', 'cancelled'].includes(d.status)) {
+              clearInterval(poll);
+              await this.fetchTasks();
+            }
+          }
+        } catch {}
+      }, 2000);
+    },
+
+    connectWS() {
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      try {
+        this.ws = new WebSocket(`${proto}//${location.hostname}:8094/ws`);
+        this.ws.onmessage = (e) => {
+          try {
+            const d = JSON.parse(e.data);
+            this.events.push({
+              ts: new Date().toLocaleTimeString(),
+              type: d.event || d.type || 'info',
+              msg: d.subtask_id ? `[${d.subtask_id}] ${d.event}` : JSON.stringify(d).substring(0, 100),
+            });
+            // Refresh current task on events
+            if (this.currentTask) this.selectTask(this.currentTask.id);
+          } catch {}
+        };
+        this.ws.onclose = () => setTimeout(() => this.connectWS(), 5000);
+      } catch {}
+    },
+
+    async fetchSandboxes() {
+      try {
+        const r = await fetch('/api/engine/sandboxes');
+        if (r.ok) {
+          const d = await r.json();
+          this.sandboxes = d.sandboxes || d || [];
+        }
+      } catch {}
+    },
+
+    async killSandbox(id) {
+      try {
+        await fetch(`/api/engine/sandbox/${id}`, { method: 'DELETE' });
+        await this.fetchSandboxes();
+      } catch {}
+    },
+
+    async fetchMemoryStats() {
+      try {
+        const r = await fetch('/api/orchestrator/memory/stats');
+        if (r.ok) this.memoryStats = await r.json();
+      } catch {}
+    },
+
+    async searchMemory() {
+      if (!this.memoryQuery.trim()) return;
+      try {
+        const r = await fetch(`/api/orchestrator/memory/search?q=${encodeURIComponent(this.memoryQuery)}`);
+        if (r.ok) {
+          const d = await r.json();
+          this.memoryResults = d.results || d || [];
+        }
+      } catch {}
+    },
+
+    renderResult() {
+      if (!this.currentTask?.subtasks) return '';
+      const synth = this.currentTask.subtasks.find(s => s.type === 'synthesis' && s.output);
+      const text = synth?.output || this.currentTask.subtasks.filter(s => s.output).map(s => s.output).join('\n\n');
+      try { return marked.parse(text || ''); } catch { return text || ''; }
+    },
+  };
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Virtual environment
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# pytest
+.pytest_cache/
+
+# Logs
+logs/
+*.log
+
+# Runtime data
+data/workspaces/
+data/memory.db
+
+# macOS
+.DS_Store
+
+# VM images (large binaries — fetch via prepare-vm-images.sh)
+config/vm-images/Image
+config/vm-images/initramfs.cpio.gz
+
+# Swift build
+.build/
+vm-launcher/.build/
+
+# Secrets (never commit)
+*.env
+.env.*

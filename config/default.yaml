@@ -1,0 +1,83 @@
+sandbox:
+  seatbelt:
+    denied_paths:
+      - "~/.ssh"
+      - "~/.gnupg"
+      - "~/Library/Keychains"
+      - "~/.openclaw/"
+      - "~/.claude/"
+      - "~/.config/git/credentials"
+      - "~/.gitconfig"
+      - "~/.netrc"
+      - "~/.aws"
+    allowed_read_paths:
+      - "/usr/lib"
+      - "/usr/bin"
+      - "/opt/homebrew"
+      - "/Library/Frameworks/Python.framework"
+      - "/private/tmp"
+      - "/var/folders"
+    max_cpu_seconds: 120
+    max_file_size_mb: 100
+    max_processes: 50
+
+  microvm:
+    default_cpus: 2
+    default_memory_gb: 2
+    max_total_memory_gb: 10
+    boot_timeout_seconds: 5
+    default_checkpoint: "base"
+    vm_images_dir: "./config/vm-images"
+
+  network:
+    proxy_port: 8098
+    allowed_domains:
+      - "pypi.org"
+      - "*.pypi.org"
+      - "files.pythonhosted.org"
+      - "registry.npmjs.org"
+      - "github.com"
+      - "*.github.com"
+      - "raw.githubusercontent.com"
+      - "api.anthropic.com"
+    deny_all_by_default: true
+
+engine:
+  host: "127.0.0.1"
+  port: 8093
+  log_file: "~/.openclaw/logs/silicon-sandbox.log"
+
+orchestrator:
+  host: "127.0.0.1"
+  port: 8094
+  max_concurrent_tasks: 3
+  task_timeout_seconds: 600
+  memory_db: "./data/memory.db"
+
+  models:
+    planner:
+      provider: anthropic
+      model: claude-sonnet-4-20250514
+      api_key_keychain: "anthropic-api-key"
+      role: "Task decomposition and synthesis"
+    coder:
+      provider: openai_compatible
+      endpoint: "http://127.0.0.1:8080/v1"
+      model: "mlx-community/Qwen3.5-35B-A3B-4bit"
+      api_key: "not-needed"
+      role: "Code generation and debugging"
+    researcher:
+      provider: anthropic
+      model: claude-sonnet-4-20250514
+      api_key_keychain: "anthropic-api-key"
+      role: "Web research and analysis"
+    fast:
+      provider: openai_compatible
+      endpoint: "http://127.0.0.1:8081/v1"
+      model: "phi-4-mini"
+      api_key: "not-needed"
+      role: "Quick classification, routing, formatting"
+
+ui:
+  host: "127.0.0.1"
+  port: 8095

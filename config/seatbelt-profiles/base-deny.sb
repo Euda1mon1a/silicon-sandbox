@@ -1,0 +1,39 @@
+;; SiliconSandbox — Base deny-all Seatbelt profile template
+;; This is a reference profile. The engine generates profiles dynamically.
+;; See sandbox_engine/seatbelt.py generate_profile() for the actual generator.
+
+(version 1)
+
+;; Baseline: allow default operations
+(allow default)
+
+;; === FILE WRITE ===
+;; Deny all file writes, then selectively re-allow workspace
+(deny file-write*)
+;; Workspace path injected at runtime:
+;; (allow file-write* (subpath "/private/var/folders/.../sandbox-XXXXXX"))
+
+;; === SENSITIVE PATHS ===
+;; Always denied (both read and write):
+;; ~/.ssh, ~/.gnupg, ~/Library/Keychains
+;; ~/.openclaw/, ~/.claude/
+;; ~/.config/git/credentials, ~/.netrc, ~/.aws
+
+;; === NETWORK ===
+;; Default: deny all network access
+(deny network*)
+;; Allow localhost IPC only
+(allow network* (remote ip "localhost:*"))
+
+;; === PROCESS ===
+(allow process-exec*)
+(allow process-fork)
+
+;; === SIGNALS ===
+(allow signal (target self))
+
+;; === MACH IPC ===
+(allow mach-lookup)
+
+;; === SYSCTL ===
+(allow sysctl-read)

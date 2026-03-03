@@ -1,0 +1,200 @@
+#!/bin/sh
+# SiliconSandbox MicroVM init — PID 1
+# Sets up the system, then runs the guest agent command loop.
+
+# Mount essential filesystems
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+mkdir -p /dev/pts /dev/shm
+mount -t devpts devpts /dev/pts
+mount -t tmpfs tmpfs /dev/shm
+mount -t tmpfs tmpfs /tmp
+mount -t tmpfs tmpfs /run
+
+# Hostname
+hostname sandbox
+
+# Loopback network
+ip link set lo up 2>/dev/null
+
+# === VirtioFS Mounts ===
+# Load virtiofs kernel modules (fuse -> virtiofs)
+virtiofs_tags=$(cat /proc/cmdline | tr ' ' '\n' | grep '^virtiofs_tags=' | cut -d= -f2-)
+if [ -n "$virtiofs_tags" ]; then
+    # Decompress modules if gzipped and load them
+    KVER=$(uname -r)
+    MODDIR="/lib/modules/$KVER/kernel/fs/fuse"
+    if [ -d "$MODDIR" ]; then
+        for mod in fuse.ko.gz virtiofs.ko.gz; do
+            if [ -f "$MODDIR/$mod" ]; then
+                gunzip -f "$MODDIR/$mod" 2>/dev/null
+            fi
+        done
+        # Load fuse first (virtiofs depends on it), then virtiofs
+        insmod "$MODDIR/fuse.ko" 2>/dev/null
+        insmod "$MODDIR/virtiofs.ko" 2>/dev/null
+    fi
+fi
+# Mount any virtiofs shares
+if [ -n "$virtiofs_tags" ]; then
+    OLD_IFS="$IFS"
+    IFS=','
+    for entry in $virtiofs_tags; do
+        tag=$(echo "$entry" | cut -d: -f1)
+        mountpoint=$(echo "$entry" | cut -d: -f2)
+        if [ -n "$tag" ] && [ -n "$mountpoint" ]; then
+            mkdir -p "$mountpoint"
+            mount -t virtiofs "$tag" "$mountpoint" 2>/dev/null
+            if [ $? -eq 0 ]; then
+                echo "VIRTIOFS: mounted $tag at $mountpoint" > /dev/hvc0
+            else
+                echo "VIRTIOFS: FAILED to mount $tag at $mountpoint" > /dev/hvc0
+            fi
+        fi
+    done
+    IFS="$OLD_IFS"
+fi
+
+# === Network Setup ===
+# Load network kernel modules if present (needed for NAT networking)
+KVER=$(uname -r)
+MODBASE="/lib/modules/$KVER/kernel"
+# Load modules in dependency order: af_packet (DHCP), failover chain, virtio_net
+for mod in \
+    "$MODBASE/net/packet/af_packet.ko" \
+    "$MODBASE/net/core/failover.ko" \
+    "$MODBASE/drivers/net/net_failover.ko" \
+    "$MODBASE/drivers/net/virtio_net.ko" \
+; do
+    gz="${mod}.gz"
+    if [ -f "$gz" ]; then
+        gunzip -f "$gz" 2>/dev/null
+    fi
+    if [ -f "$mod" ]; then
+        insmod "$mod" 2>/dev/null
+    fi
+done
+
+# If an eth0 interface exists (NAT enabled), configure it via DHCP
+if ip link show eth0 >/dev/null 2>&1; then
+    ip link set eth0 up
+    # Use udhcpc (busybox) for DHCP
+    udhcpc -i eth0 -s /usr/share/udhcpc/default.script -q -n 2>/dev/null
+    if [ $? -eq 0 ]; then
+        echo "NET: eth0 configured via DHCP" > /dev/hvc0
+    else
+        echo "NET: eth0 DHCP failed" > /dev/hvc0
+    fi
+
+    # Set up HTTP proxy if specified in kernel cmdline
+    http_proxy_val=$(cat /proc/cmdline | tr ' ' '\n' | grep '^http_proxy=' | cut -d= -f2-)
+    if [ -n "$http_proxy_val" ]; then
+        export http_proxy="$http_proxy_val"
+        export https_proxy="$http_proxy_val"
+        export HTTP_PROXY="$http_proxy_val"
+        export HTTPS_PROXY="$http_proxy_val"
+        echo "NET: proxy=$http_proxy_val" > /dev/hvc0
+    fi
+fi
+
+# Workspace
+mkdir -p /workspace
+chmod 777 /workspace
+
+# Signal readiness — host waits for this marker
+echo "SANDBOX_READY" > /dev/hvc0
+
+# === Guest Agent Command Loop ===
+# Protocol: host sends one-line JSON, guest responds with one-line JSON.
+# Responses are prefixed with "RESP:" to distinguish from kernel output.
+# Commands: exec, write_file, read_file, ping, shutdown
+
+while IFS= read -r line; do
+    # Parse method from JSON (basic sed parsing, busybox compatible)
+    method=$(echo "$line" | sed -n 's/.*"method"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    req_id=$(echo "$line" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')
+    req_id=${req_id:-0}
+
+    case "$method" in
+        ping)
+            echo "RESP:{\"result\":{\"status\":\"ok\",\"hostname\":\"sandbox\"},\"id\":$req_id}" > /dev/hvc0
+            ;;
+        exec)
+            # Extract command — match content between "command":"..." (non-greedy via [^"]*)
+            command=$(echo "$line" | sed -n 's/.*"command"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | sed 's/\\"/"/g')
+            # Extract timeout
+            timeout=$(echo "$line" | sed -n 's/.*"timeout"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')
+            timeout=${timeout:-30}
+
+            # Execute with timeout
+            tmpout=$(mktemp /tmp/out.XXXXXX)
+            tmperr=$(mktemp /tmp/err.XXXXXX)
+            cd /workspace
+
+            /bin/sh -c "$command" > "$tmpout" 2> "$tmperr" &
+            cmd_pid=$!
+
+            elapsed=0
+            timed_out=0
+            while kill -0 $cmd_pid 2>/dev/null; do
+                sleep 1
+                elapsed=$((elapsed + 1))
+                if [ "$elapsed" -ge "$timeout" ]; then
+                    kill -9 $cmd_pid 2>/dev/null
+                    wait $cmd_pid 2>/dev/null
+                    timed_out=1
+                    break
+                fi
+            done
+
+            if [ "$timed_out" = "1" ]; then
+                echo "RESP:{\"result\":{\"stdout\":\"\",\"stderr\":\"timeout after ${timeout}s\",\"exit_code\":-1,\"status\":\"timeout\"},\"id\":$req_id}" > /dev/hvc0
+            else
+                wait $cmd_pid
+                exit_code=$?
+                # Base64 encode output (tr -d '\n' to keep on single line)
+                stdout_b64=$(cat "$tmpout" | base64 2>/dev/null | tr -d '\n')
+                stderr_b64=$(cat "$tmperr" | base64 2>/dev/null | tr -d '\n')
+                echo "RESP:{\"result\":{\"stdout_b64\":\"$stdout_b64\",\"stderr_b64\":\"$stderr_b64\",\"exit_code\":$exit_code,\"status\":\"completed\"},\"id\":$req_id}" > /dev/hvc0
+            fi
+            rm -f "$tmpout" "$tmperr"
+            ;;
+        write_file)
+            path=$(echo "$line" | sed -n 's/.*"path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+            content_b64=$(echo "$line" | sed -n 's/.*"content_b64"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+            case "$path" in
+                /*) ;;
+                *) path="/workspace/$path" ;;
+            esac
+            mkdir -p "$(dirname "$path")"
+            echo "$content_b64" | base64 -d > "$path" 2>/dev/null
+            size=$(wc -c < "$path")
+            echo "RESP:{\"result\":{\"path\":\"$path\",\"size\":$size},\"id\":$req_id}" > /dev/hvc0
+            ;;
+        read_file)
+            path=$(echo "$line" | sed -n 's/.*"path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+            case "$path" in
+                /*) ;;
+                *) path="/workspace/$path" ;;
+            esac
+            if [ -f "$path" ]; then
+                content_b64=$(cat "$path" | base64 2>/dev/null | tr -d '\n')
+                size=$(wc -c < "$path")
+                echo "RESP:{\"result\":{\"path\":\"$path\",\"content_b64\":\"$content_b64\",\"size\":$size},\"id\":$req_id}" > /dev/hvc0
+            else
+                echo "RESP:{\"error\":\"File not found: $path\",\"id\":$req_id}" > /dev/hvc0
+            fi
+            ;;
+        shutdown)
+            echo "RESP:{\"result\":{\"status\":\"shutting_down\"},\"id\":$req_id}" > /dev/hvc0
+            poweroff -f
+            ;;
+        *)
+            echo "RESP:{\"error\":\"Unknown method: $method\",\"id\":$req_id}" > /dev/hvc0
+            ;;
+    esac
+done < /dev/hvc0
+
+# If we get here, the serial console closed
+poweroff -f
