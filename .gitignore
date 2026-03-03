@@ -33,6 +33,8 @@ data/memory.db
 # VM images (large binaries — fetch via prepare-vm-images.sh)
 config/vm-images/Image
 config/vm-images/initramfs.cpio.gz
+config/vm-images/alpine-minirootfs.tar.gz
+config/vm-images/vmlinuz-virt
 
 # Swift build
 .build/

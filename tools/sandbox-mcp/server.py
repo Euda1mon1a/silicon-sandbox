@@ -2,7 +2,7 @@
 """
 SiliconSandbox MCP Server — expose sandbox engine to Claude Code sessions.
 
-Runs as a persistent HTTP server on 127.0.0.1:8096 (streamable-http transport).
+Runs as a persistent HTTP server on 127.0.0.1:8100 (streamable-http transport).
 Wraps the sandbox engine API on port 8093.
 
 Tools:
@@ -25,7 +25,7 @@ import sys
 import httpx
 from mcp.server.fastmcp import FastMCP
 
-server = FastMCP("silicon-sandbox", host="127.0.0.1", port=8096)
+server = FastMCP("silicon-sandbox", host="127.0.0.1", port=8100)
 
 ENGINE_URL = os.environ.get("SILICONSANDBOX_ENGINE_URL", "http://127.0.0.1:8093")
 _auth_token = os.environ.get("SILICONSANDBOX_AUTH_TOKEN")
