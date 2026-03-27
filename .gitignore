@@ -35,6 +35,7 @@ config/vm-images/Image
 config/vm-images/initramfs.cpio.gz
 config/vm-images/alpine-minirootfs.tar.gz
 config/vm-images/vmlinuz-virt
+config/vm-images/*.img
 
 # Swift build
 .build/

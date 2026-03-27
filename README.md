@@ -1,10 +1,20 @@
 # SiliconSandbox
 
+> **Archived — not actively maintained.** This project is published as-is. It works, has 246 tests (94% pass rate), and ran in production for a month. PRs and issues are welcome but may not be addressed.
+
 Apple Silicon native AI agent sandbox and orchestration platform. Runs entirely on macOS using native primitives — no Docker, no cloud dependency.
 
 ## What It Does
 
-Provides isolated execution environments for AI agents to run code safely, plus an orchestrator to break complex tasks into parallel subtasks routed across local and cloud models.
+Provides isolated execution environments for AI agents to run code safely, plus an orchestrator to break complex tasks into parallel subtasks routed across local and cloud LLMs.
+
+Three isolation tiers — pick the right tradeoff between security and speed:
+
+| Tier | Technology | RAM | Boot | Use Case |
+|------|-----------|-----|------|----------|
+| A (Seatbelt) | macOS `sandbox-exec` + SBPL | ~0 MB | ~50ms | Default for code execution |
+| B (MicroVM) | Apple Virtualization.framework + Alpine Linux | ~256 MB | ~260ms | Untrusted binaries, Linux envs, browser automation |
+| C (Native) | `subprocess` + rlimit + setpgrp | ~0 MB | ~10ms | Trusted internal tools |
 
 ## Architecture
 
@@ -12,25 +22,22 @@ Provides isolated execution environments for AI agents to run code safely, plus 
 Web UI (:8095) ─── Orchestrator (:8094) ─── Sandbox Engine (:8093)
                          │                        │
                     Model Router              Three Tiers:
-                    ├─ Qwen3.5 (:8080)        ├─ A: Seatbelt (sandbox-exec, ~0 RAM)
-                    ├─ Phi-4 (:8081)          ├─ B: MicroVM (Virt.framework, ~256MB)
-                    └─ Claude API             └─ C: Native (subprocess + rlimit)
+                    ├─ Local LLM (coder)      ├─ A: Seatbelt (sandbox-exec)
+                    ├─ Local LLM (classifier) ├─ B: MicroVM (Virt.framework)
+                    └─ Claude API (planner)   └─ C: Native (subprocess + rlimit)
                                                    │
 MCP Server (:8100) ──────────────────────────── Engine API
-  11 tools for Claude Code
+  11 tools for Claude Code                         │
+                                              Network Proxy (:8098)
+                                              Domain allowlist, deny-all default
 ```
 
-## Services
+## Requirements
 
-| Port | Service | LaunchAgent |
-|------|---------|-------------|
-| 8093 | Sandbox Engine | `com.siliconsandbox.engine` |
-| 8094 | Orchestrator | `com.siliconsandbox.orchestrator` |
-| 8095 | Web UI | `com.siliconsandbox.ui` |
-| 8098 | Network Allowlist Proxy | (embedded in engine) |
-| 8100 | MCP Tool Server | `com.siliconsandbox.mcp` |
-
-All ports bind to 127.0.0.1 only.
+- macOS 14+ (Sonoma) on Apple Silicon (M1/M2/M3/M4)
+- Python 3.12+
+- Xcode Command Line Tools (for Swift vm-launcher build)
+- Optional: Anthropic API key for the orchestrator's planner
 
 ## Quick Start
 
@@ -62,6 +69,11 @@ curl -X POST http://127.0.0.1:8093/sandbox \
 curl -X POST http://127.0.0.1:8093/session \
   -H 'Content-Type: application/json' \
   -d '{"tier": "A", "ttl_seconds": 3600}'
+
+# Execute in session
+curl -X POST http://127.0.0.1:8093/session/{id}/exec \
+  -H 'Content-Type: application/json' \
+  -d '{"command": "python3 main.py"}'
 ```
 
 ### Python SDK
@@ -73,46 +85,87 @@ from silicon_sandbox import Sandbox, Session
 result = Sandbox.run("echo hello", tier="A")
 print(result.stdout)
 
-# Persistent session
+# Persistent session with file operations
 with Session.create() as session:
     session.write_files({"main.py": "print('hello')"})
     result = session.exec("python3 main.py")
     print(result.stdout)
 ```
 
-### MCP Tools (Claude Code)
+### MCP Tools (Claude Code / AI Agents)
 
-Registered in `~/.mcp.json` as `silicon-sandbox`. Available tools:
+Register in your MCP config. Available tools:
 
 - `sandbox_run` — one-shot sandboxed execution
 - `sandbox_health` — engine health check
 - `session_create` / `session_exec` / `session_destroy` — persistent sessions
-- `session_write_files` / `session_read_file` — file operations
-- `session_pause` / `session_resume` — SIGSTOP/SIGCONT
+- `session_write_files` / `session_read_file` — file operations in sessions
+- `session_pause` / `session_resume` — SIGSTOP/SIGCONT process control
 - `session_list` — list active sessions
 
-## Sandbox Tiers
+### Desktop Automation (Tier B)
 
-| Tier | Technology | RAM | Boot | Use Case |
-|------|-----------|-----|------|----------|
-| A (Seatbelt) | `sandbox-exec` + SBPL | ~0 MB | ~50ms | Default for code execution |
-| B (MicroVM) | Virtualization.framework + Alpine | ~256 MB | ~260ms | Linux envs, untrusted binaries |
-| C (Native) | `subprocess` + rlimit + setpgrp | ~0 MB | ~10ms | Trusted internal tools |
+Tier B boots a full Alpine Linux VM with Xvfb, Openbox, and Chromium:
 
-### Security
+```bash
+# Create a desktop session
+curl -X POST http://127.0.0.1:8093/session \
+  -H 'Content-Type: application/json' \
+  -d '{"tier": "B", "image": "desktop"}'
 
-- **Deny-default** Seatbelt profiles (v2): `(deny default)` base with selective allows
-- **Blocked paths**: `~/.ssh`, `~/.gnupg`, `~/Library/Keychains`, `~/.openclaw/`, `~/.claude/`
+# Take a screenshot
+curl http://127.0.0.1:8093/session/{id}/screenshot --output screen.png
+
+# Control the browser via CDP
+curl -X POST http://127.0.0.1:8093/session/{id}/browser/control \
+  -H 'Content-Type: application/json' \
+  -d '{"method": "Page.navigate", "params": {"url": "https://example.com"}}'
+```
+
+## Security
+
+- **Deny-default** Seatbelt profiles (SBPL v2): `(deny default)` base with selective allows
+- **Blocked paths**: `~/.ssh`, `~/.gnupg`, `~/Library/Keychains`, `~/.config/git/credentials`, `~/.netrc`, `~/.aws`
 - **Process isolation**: `os.setpgrp()` + `resource.setrlimit()` per sandbox
 - **Network**: deny-all by default, opt-in through domain allowlist proxy on :8098
-- **Auth**: optional Bearer token via `SILICONSANDBOX_AUTH_TOKEN`
+- **Auth**: optional Bearer token via `SILICONSANDBOX_AUTH_TOKEN` env var
+
+## Configuration
+
+Copy and edit `config/default.yaml`:
+
+```yaml
+sandbox:
+  seatbelt:
+    denied_paths: ["~/.ssh", "~/.gnupg", "~/Library/Keychains"]
+    max_cpu_seconds: 120
+    max_processes: 50
+  microvm:
+    default_cpus: 2
+    default_memory_gb: 2
+  network:
+    proxy_port: 8098
+    allowed_domains: ["pypi.org", "github.com"]
+    deny_all_by_default: true
+
+orchestrator:
+  models:
+    planner:
+      provider: anthropic
+      model: claude-sonnet-4-20250514
+    coder:
+      provider: openai_compatible
+      endpoint: "http://127.0.0.1:8080/v1"
+      model: "your-local-model"
+```
+
+The orchestrator's model router supports any OpenAI-compatible endpoint for local models and Anthropic API for planning/research roles. Set `ANTHROPIC_API_KEY` in your environment for the planner.
 
 ## Tests
 
 ```bash
-cd ~/workspace/silicon-sandbox
 .venv/bin/python3 -m pytest tests/ -v
-# 226 tests across 8 test modules
+# 246 tests across 8 modules
 ```
 
 ## Project Structure
@@ -129,15 +182,19 @@ silicon-sandbox/
 │   ├── code-interpreter/    # Python/Node/Bash execution
 │   ├── file-manager/        # Scoped workspace operations
 │   ├── web-research/        # DuckDuckGo + readability
-│   └── browser-automation/  # Playwright (requires MicroVM)
+│   └── browser-automation/  # CDP via MicroVM desktop
 ├── sdk/                     # Python SDK (silicon_sandbox package)
 ├── ui/                      # Web UI (Alpine.js, single HTML file)
-├── config/                  # YAML config, SBPL profiles, VM images
+├── config/                  # YAML config, SBPL profiles, VM image scripts
 ├── scripts/                 # install.sh, launch.sh, stop.sh
-├── launchd/                 # LaunchAgent plists
-└── tests/                   # 226 tests
+├── launchd/                 # LaunchAgent plist templates
+└── tests/                   # 246 tests
 ```
 
-## Version
+## Acknowledgments
 
-0.4.0
+Phase 8 hardening was informed by review of [Alibaba's OpenSandbox](https://github.com/alibaba/OpenSandbox) — specifically the deny-default Seatbelt profile pattern, `preexec_fn` process isolation approach, persistent session concept, and SDK design. No code was copied; the implementation is independent.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

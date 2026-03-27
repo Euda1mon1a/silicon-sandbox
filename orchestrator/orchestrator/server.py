@@ -17,8 +17,10 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from .engine import DAGEngine
 from .memory import MemoryStore
 from .models import (
+    CreateDirectTaskRequest,
     CreateTaskRequest,
     MemorySearchResult,
+    Subtask,
     Task,
     TaskResponse,
     TaskStatus,
@@ -148,16 +150,27 @@ async def create_task(req: CreateTaskRequest):
     for st in subtasks:
         task.add_subtask(st)
 
-    # Execute in background thread (so the API returns immediately)
-    done_event = threading.Event()
+    _execute_task_background(task)
+    return task.to_response()
+
+
+def _execute_task_background(task: Task) -> None:
+    """Run a task's DAG in a background thread."""
+    task_id = task.id
 
     def _run_task():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
             loop.run_until_complete(_engine.execute(task))
-            # Log to memory
-            if _memory:
+        except Exception as e:
+            task.status = TaskStatus.FAILED
+            task.error = str(e)
+            logger.exception("Task %s execution failed", task_id)
+
+        # Memory logging is non-fatal — don't fail a completed task over logging errors
+        if _memory:
+            try:
                 _memory.log_task(
                     task_id=task.id,
                     goal=task.goal,
@@ -166,26 +179,50 @@ async def create_task(req: CreateTaskRequest):
                     subtask_count=len(task.subtasks),
                     elapsed_seconds=time.time() - task.created_at,
                 )
-                # Store successful results as memory
                 if task.status == TaskStatus.COMPLETED and task.result:
                     loop.run_until_complete(_memory.add(
                         content=f"Task: {task.goal}\nResult: {task.result[:500]}",
                         category="task_result",
                         source=f"task:{task.id}",
                     ))
-        except Exception as e:
-            task.status = TaskStatus.FAILED
-            task.error = str(e)
-            logger.exception("Task %s execution failed", task_id)
-        finally:
-            done_event.set()
-            _background_threads.pop(task_id, None)
-            loop.close()
+            except Exception as mem_err:
+                logger.warning("Memory logging failed (non-fatal): %s", mem_err)
+
+        _background_threads.pop(task_id, None)
+        loop.close()
 
     thread = threading.Thread(target=_run_task, daemon=True)
     _background_threads[task_id] = thread
     thread.start()
 
+
+@app.post("/tasks/direct", response_model=TaskResponse)
+async def create_direct_task(req: CreateDirectTaskRequest):
+    """Submit a pre-built task DAG for execution without LLM decomposition.
+
+    Skips the planner entirely — caller provides subtask definitions.
+    Useful for cron jobs, known scripts, and other deterministic workloads.
+    """
+    task_id = uuid.uuid4().hex[:12]
+    task = Task(task_id=task_id, goal=req.goal, timeout=req.timeout)
+    _tasks[task_id] = task
+
+    for i, st_req in enumerate(req.subtasks):
+        st_id = st_req.id or f"s{i + 1}"
+        subtask = Subtask(
+            subtask_id=st_id,
+            task_type=st_req.type,
+            description=st_req.description,
+            command=st_req.command,
+            prompt=st_req.prompt,
+            model=st_req.model,
+            sandbox_tier=st_req.sandbox_tier,
+            depends_on=st_req.depends_on,
+            timeout=st_req.timeout,
+        )
+        task.add_subtask(subtask)
+
+    _execute_task_background(task)
     return task.to_response()
 
 

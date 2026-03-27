@@ -1,0 +1,457 @@
+#!/bin/sh
+# SiliconSandbox Desktop MicroVM init — PID 1
+# Extends base init with Xvfb display, Openbox WM, and desktop RPCs.
+# Used when booting from the desktop disk image.
+
+# Mount essential filesystems
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+mkdir -p /dev/pts /dev/shm
+mount -t devpts devpts /dev/pts
+mount -t tmpfs tmpfs /dev/shm
+mount -t tmpfs tmpfs /tmp
+mount -t tmpfs tmpfs /run
+
+# Hostname
+hostname sandbox-desktop
+
+# Loopback network
+ip link set lo up 2>/dev/null
+
+# === VirtioFS Mounts ===
+virtiofs_tags=$(cat /proc/cmdline | tr ' ' '\n' | grep '^virtiofs_tags=' | cut -d= -f2-)
+if [ -n "$virtiofs_tags" ]; then
+    KVER=$(uname -r)
+    MODDIR="/lib/modules/$KVER/kernel/fs/fuse"
+    if [ -d "$MODDIR" ]; then
+        for mod in fuse.ko.gz virtiofs.ko.gz; do
+            if [ -f "$MODDIR/$mod" ]; then
+                gunzip -f "$MODDIR/$mod" 2>/dev/null
+            fi
+        done
+        insmod "$MODDIR/fuse.ko" 2>/dev/null
+        insmod "$MODDIR/virtiofs.ko" 2>/dev/null
+    fi
+fi
+if [ -n "$virtiofs_tags" ]; then
+    OLD_IFS="$IFS"
+    IFS=','
+    for entry in $virtiofs_tags; do
+        tag=$(echo "$entry" | cut -d: -f1)
+        mountpoint=$(echo "$entry" | cut -d: -f2)
+        if [ -n "$tag" ] && [ -n "$mountpoint" ]; then
+            mkdir -p "$mountpoint"
+            mount -t virtiofs "$tag" "$mountpoint" 2>/dev/null
+        fi
+    done
+    IFS="$OLD_IFS"
+fi
+
+# === Network Setup ===
+KVER=$(uname -r)
+MODBASE="/lib/modules/$KVER/kernel"
+for mod in \
+    "$MODBASE/net/packet/af_packet.ko" \
+    "$MODBASE/net/core/failover.ko" \
+    "$MODBASE/drivers/net/net_failover.ko" \
+    "$MODBASE/drivers/net/virtio_net.ko" \
+; do
+    gz="${mod}.gz"
+    if [ -f "$gz" ]; then
+        gunzip -f "$gz" 2>/dev/null
+    fi
+    if [ -f "$mod" ]; then
+        insmod "$mod" 2>/dev/null
+    fi
+done
+
+if ip link show eth0 >/dev/null 2>&1; then
+    ip link set eth0 up
+    udhcpc -i eth0 -s /usr/share/udhcpc/default.script -q -n 2>/dev/null
+
+    http_proxy_val=$(cat /proc/cmdline | tr ' ' '\n' | grep '^http_proxy=' | cut -d= -f2-)
+    if [ -n "$http_proxy_val" ]; then
+        export http_proxy="$http_proxy_val"
+        export https_proxy="$http_proxy_val"
+        export HTTP_PROXY="$http_proxy_val"
+        export HTTPS_PROXY="$http_proxy_val"
+    fi
+fi
+
+# Workspace
+mkdir -p /workspace
+chmod 777 /workspace
+
+# === Desktop Environment ===
+export DISPLAY=:99
+
+# Start dbus (needed by Chromium)
+mkdir -p /run/dbus
+dbus-daemon --system 2>/dev/null &
+
+# Start Xvfb (virtual framebuffer)
+Xvfb :99 -screen 0 1280x720x24 -ac +extension GLX +render -noreset &
+XVFB_PID=$!
+sleep 1
+
+# Start Openbox (lightweight window manager)
+openbox &
+sleep 0.5
+
+# Track browser PID
+BROWSER_PID=""
+
+# Signal readiness
+echo "SANDBOX_READY" > /dev/hvc0
+
+# === Guest Agent Command Loop ===
+# Base commands: exec, write_file, read_file, ping, shutdown
+# Desktop commands: screenshot, input, browser_open, browser_control
+
+while IFS= read -r line; do
+    method=$(echo "$line" | sed -n 's/.*"method"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    req_id=$(echo "$line" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')
+    req_id=${req_id:-0}
+
+    case "$method" in
+        ping)
+            # Include desktop status in ping response
+            xvfb_ok="false"
+            kill -0 $XVFB_PID 2>/dev/null && xvfb_ok="true"
+            browser_ok="false"
+            [ -n "$BROWSER_PID" ] && kill -0 $BROWSER_PID 2>/dev/null && browser_ok="true"
+            echo "RESP:{\"result\":{\"status\":\"ok\",\"hostname\":\"sandbox-desktop\",\"display\":\":99\",\"xvfb\":$xvfb_ok,\"browser\":$browser_ok},\"id\":$req_id}" > /dev/hvc0
+            ;;
+
+        exec)
+            command=$(echo "$line" | sed -n 's/.*"command"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | sed 's/\\"/"/g')
+            timeout=$(echo "$line" | sed -n 's/.*"timeout"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')
+            timeout=${timeout:-30}
+
+            tmpout=$(mktemp /tmp/out.XXXXXX)
+            tmperr=$(mktemp /tmp/err.XXXXXX)
+            cd /workspace
+
+            # Desktop commands get DISPLAY set
+            DISPLAY=:99 /bin/sh -c "$command" > "$tmpout" 2> "$tmperr" &
+            cmd_pid=$!
+
+            elapsed=0
+            timed_out=0
+            while kill -0 $cmd_pid 2>/dev/null; do
+                sleep 1
+                elapsed=$((elapsed + 1))
+                if [ "$elapsed" -ge "$timeout" ]; then
+                    kill -9 $cmd_pid 2>/dev/null
+                    wait $cmd_pid 2>/dev/null
+                    timed_out=1
+                    break
+                fi
+            done
+
+            if [ "$timed_out" = "1" ]; then
+                echo "RESP:{\"result\":{\"stdout\":\"\",\"stderr\":\"timeout after ${timeout}s\",\"exit_code\":-1,\"status\":\"timeout\"},\"id\":$req_id}" > /dev/hvc0
+            else
+                wait $cmd_pid
+                exit_code=$?
+                stdout_b64=$(cat "$tmpout" | base64 2>/dev/null | tr -d '\n')
+                stderr_b64=$(cat "$tmperr" | base64 2>/dev/null | tr -d '\n')
+                echo "RESP:{\"result\":{\"stdout_b64\":\"$stdout_b64\",\"stderr_b64\":\"$stderr_b64\",\"exit_code\":$exit_code,\"status\":\"completed\"},\"id\":$req_id}" > /dev/hvc0
+            fi
+            rm -f "$tmpout" "$tmperr"
+            ;;
+
+        screenshot)
+            # Capture the virtual display as PNG
+            # Params: format (png default), region (WxH+X+Y, optional)
+            format=$(echo "$line" | sed -n 's/.*"format"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+            format=${format:-png}
+            region=$(echo "$line" | sed -n 's/.*"region"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+
+            scrot_file="/tmp/screenshot.$format"
+            if [ -n "$region" ]; then
+                # Use scrot with region crop: WxH+X+Y
+                DISPLAY=:99 scrot "$scrot_file" 2>/dev/null
+                # Crop with convert if available
+                if [ -n "$region" ] && command -v convert >/dev/null 2>&1; then
+                    convert "$scrot_file" -crop "$region" "/tmp/screenshot_crop.$format" 2>/dev/null
+                    scrot_file="/tmp/screenshot_crop.$format"
+                fi
+            else
+                DISPLAY=:99 scrot "$scrot_file" 2>/dev/null
+            fi
+
+            if [ -f "$scrot_file" ]; then
+                img_b64=$(cat "$scrot_file" | base64 2>/dev/null | tr -d '\n')
+                size=$(wc -c < "$scrot_file")
+                echo "RESP:{\"result\":{\"image_b64\":\"$img_b64\",\"format\":\"$format\",\"size\":$size},\"id\":$req_id}" > /dev/hvc0
+            else
+                echo "RESP:{\"error\":\"Screenshot capture failed\",\"id\":$req_id}" > /dev/hvc0
+            fi
+            rm -f /tmp/screenshot.* /tmp/screenshot_crop.* 2>/dev/null
+            ;;
+
+        input)
+            # Inject keyboard/mouse input via xdotool
+            # Params: action (click/type/key/scroll/mousemove), params (varies)
+            action=$(echo "$line" | sed -n 's/.*"action"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+
+            case "$action" in
+                click)
+                    x=$(echo "$line" | sed -n 's/.*"x"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')
+                    y=$(echo "$line" | sed -n 's/.*"y"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')
+                    button=$(echo "$line" | sed -n 's/.*"button"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')
+                    button=${button:-1}
+                    DISPLAY=:99 xdotool mousemove "$x" "$y" click "$button" 2>/dev/null
+                    echo "RESP:{\"result\":{\"action\":\"click\",\"x\":$x,\"y\":$y,\"button\":$button},\"id\":$req_id}" > /dev/hvc0
+                    ;;
+                type)
+                    text=$(echo "$line" | sed -n 's/.*"text"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | sed 's/\\"/"/g')
+                    DISPLAY=:99 xdotool type -- "$text" 2>/dev/null
+                    echo "RESP:{\"result\":{\"action\":\"type\",\"length\":${#text}},\"id\":$req_id}" > /dev/hvc0
+                    ;;
+                key)
+                    combo=$(echo "$line" | sed -n 's/.*"combo"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+                    DISPLAY=:99 xdotool key -- "$combo" 2>/dev/null
+                    echo "RESP:{\"result\":{\"action\":\"key\",\"combo\":\"$combo\"},\"id\":$req_id}" > /dev/hvc0
+                    ;;
+                scroll)
+                    dx=$(echo "$line" | sed -n 's/.*"dx"[[:space:]]*:[[:space:]]*\(-*[0-9][0-9]*\).*/\1/p')
+                    dy=$(echo "$line" | sed -n 's/.*"dy"[[:space:]]*:[[:space:]]*\(-*[0-9][0-9]*\).*/\1/p')
+                    dx=${dx:-0}
+                    dy=${dy:-0}
+                    # xdotool: button 4=scroll up, 5=scroll down
+                    if [ "$dy" -gt 0 ]; then
+                        DISPLAY=:99 xdotool click --repeat "$dy" 5 2>/dev/null
+                    elif [ "$dy" -lt 0 ]; then
+                        abs_dy=$(( -1 * dy ))
+                        DISPLAY=:99 xdotool click --repeat "$abs_dy" 4 2>/dev/null
+                    fi
+                    echo "RESP:{\"result\":{\"action\":\"scroll\",\"dx\":$dx,\"dy\":$dy},\"id\":$req_id}" > /dev/hvc0
+                    ;;
+                mousemove)
+                    x=$(echo "$line" | sed -n 's/.*"x"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')
+                    y=$(echo "$line" | sed -n 's/.*"y"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')
+                    DISPLAY=:99 xdotool mousemove "$x" "$y" 2>/dev/null
+                    echo "RESP:{\"result\":{\"action\":\"mousemove\",\"x\":$x,\"y\":$y},\"id\":$req_id}" > /dev/hvc0
+                    ;;
+                *)
+                    echo "RESP:{\"error\":\"Unknown input action: $action\",\"id\":$req_id}" > /dev/hvc0
+                    ;;
+            esac
+            ;;
+
+        browser_open)
+            # Start or navigate Chromium
+            url=$(echo "$line" | sed -n 's/.*"url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+            url=${url:-about:blank}
+
+            if [ -n "$BROWSER_PID" ] && kill -0 $BROWSER_PID 2>/dev/null; then
+                # Browser already running — navigate via CDP
+                curl -sf "http://127.0.0.1:9222/json/new?${url}" >/dev/null 2>&1
+                echo "RESP:{\"result\":{\"action\":\"navigate\",\"url\":\"$url\",\"pid\":$BROWSER_PID},\"id\":$req_id}" > /dev/hvc0
+            else
+                # Start Chromium
+                DISPLAY=:99 chromium \
+                    --no-sandbox \
+                    --disable-gpu \
+                    --disable-dev-shm-usage \
+                    --remote-debugging-port=9222 \
+                    --window-size=1280,720 \
+                    --window-position=0,0 \
+                    "$url" &
+                BROWSER_PID=$!
+                sleep 2
+                echo "RESP:{\"result\":{\"action\":\"open\",\"url\":\"$url\",\"pid\":$BROWSER_PID},\"id\":$req_id}" > /dev/hvc0
+            fi
+            ;;
+
+        browser_control)
+            # Chrome DevTools Protocol commands via localhost:9222 WebSocket
+            # Params: cdp_method (e.g., "Runtime.evaluate"), cdp_params (JSON object)
+            cdp_method=$(echo "$line" | sed -n 's/.*"cdp_method"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+
+            # Extract cdp_params — may be nested JSON, use python3
+            cdp_result=$(python3 -c "
+import json, sys, socket, hashlib, base64, os, struct
+
+# Parse the original request to get cdp_params
+try:
+    req = json.loads(sys.argv[1])
+    params = req.get('params', {})
+    cdp_method = params.get('cdp_method', '')
+    cdp_params = params.get('cdp_params', {})
+except Exception:
+    cdp_method = '$cdp_method'
+    cdp_params = {}
+
+# Get WebSocket URL from CDP HTTP API
+import urllib.request
+try:
+    resp = urllib.request.urlopen('http://127.0.0.1:9222/json', timeout=3)
+    pages = json.loads(resp.read())
+    if not pages:
+        print(json.dumps({'error': 'No browser pages found'}))
+        sys.exit(0)
+    # Find the first actual page (not extension background)
+    page = None
+    for p in pages:
+        if p.get('type') == 'page':
+            page = p
+            break
+    if page is None:
+        page = pages[0]
+    ws_url = page.get('webSocketDebuggerUrl', '')
+except Exception as e:
+    print(json.dumps({'error': f'CDP unavailable: {e}'}))
+    sys.exit(0)
+
+if not ws_url:
+    print(json.dumps({'error': 'No WebSocket URL'}))
+    sys.exit(0)
+
+# Parse ws:// URL
+# ws://127.0.0.1:9222/devtools/page/XXXX
+parts = ws_url.replace('ws://', '').split('/', 1)
+host_port = parts[0].split(':')
+host = host_port[0]
+port = int(host_port[1]) if len(host_port) > 1 else 80
+path = '/' + parts[1] if len(parts) > 1 else '/'
+
+# WebSocket handshake
+key = base64.b64encode(os.urandom(16)).decode()
+sock = socket.create_connection((host, port), timeout=5)
+req_str = (
+    f'GET {path} HTTP/1.1\r\n'
+    f'Host: {host}:{port}\r\n'
+    f'Upgrade: websocket\r\n'
+    f'Connection: Upgrade\r\n'
+    f'Sec-WebSocket-Key: {key}\r\n'
+    f'Sec-WebSocket-Version: 13\r\n'
+    f'\r\n'
+)
+sock.sendall(req_str.encode())
+
+# Read response headers
+response = b''
+while b'\r\n\r\n' not in response:
+    response += sock.recv(4096)
+
+if b'101' not in response.split(b'\r\n')[0]:
+    print(json.dumps({'error': 'WebSocket handshake failed'}))
+    sys.exit(0)
+
+# Send CDP command as masked WebSocket frame
+cdp_msg = json.dumps({'id': 1, 'method': cdp_method, 'params': cdp_params})
+payload = cdp_msg.encode()
+mask_key = os.urandom(4)
+
+# Build frame: FIN=1, opcode=1 (text)
+frame = bytearray()
+frame.append(0x81)  # FIN + text
+plen = len(payload)
+if plen < 126:
+    frame.append(0x80 | plen)  # MASK bit + length
+elif plen < 65536:
+    frame.append(0x80 | 126)
+    frame.extend(struct.pack('>H', plen))
+else:
+    frame.append(0x80 | 127)
+    frame.extend(struct.pack('>Q', plen))
+frame.extend(mask_key)
+masked = bytearray(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+frame.extend(masked)
+sock.sendall(bytes(frame))
+
+# Read response frame
+sock.settimeout(10)
+data = b''
+while True:
+    chunk = sock.recv(65536)
+    if not chunk:
+        break
+    data += chunk
+    # Check if we have a complete frame
+    if len(data) >= 2:
+        first_byte = data[0]
+        second_byte = data[1]
+        mask_bit = second_byte & 0x80
+        payload_len = second_byte & 0x7F
+        offset = 2
+        if payload_len == 126:
+            if len(data) < 4: continue
+            payload_len = struct.unpack('>H', data[2:4])[0]
+            offset = 4
+        elif payload_len == 127:
+            if len(data) < 10: continue
+            payload_len = struct.unpack('>Q', data[2:10])[0]
+            offset = 10
+        if mask_bit:
+            offset += 4
+        if len(data) >= offset + payload_len:
+            frame_data = data[offset:offset + payload_len]
+            break
+
+sock.close()
+
+try:
+    result = json.loads(frame_data.decode())
+    print(json.dumps(result.get('result', result)))
+except Exception:
+    print(json.dumps({'raw': frame_data.decode()[:2000]}))
+" "$line" 2>/dev/null)
+
+            if [ -z "$cdp_result" ]; then
+                echo "RESP:{\"error\":\"CDP command failed\",\"id\":$req_id}" > /dev/hvc0
+            else
+                cdp_b64=$(echo "$cdp_result" | base64 2>/dev/null | tr -d '\n')
+                echo "RESP:{\"result\":{\"cdp_result_b64\":\"$cdp_b64\"},\"id\":$req_id}" > /dev/hvc0
+            fi
+            ;;
+
+        write_file)
+            path=$(echo "$line" | sed -n 's/.*"path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+            content_b64=$(echo "$line" | sed -n 's/.*"content_b64"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+            case "$path" in
+                /*) ;;
+                *) path="/workspace/$path" ;;
+            esac
+            mkdir -p "$(dirname "$path")"
+            echo "$content_b64" | base64 -d > "$path" 2>/dev/null
+            size=$(wc -c < "$path")
+            echo "RESP:{\"result\":{\"path\":\"$path\",\"size\":$size},\"id\":$req_id}" > /dev/hvc0
+            ;;
+
+        read_file)
+            path=$(echo "$line" | sed -n 's/.*"path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+            case "$path" in
+                /*) ;;
+                *) path="/workspace/$path" ;;
+            esac
+            if [ -f "$path" ]; then
+                content_b64=$(cat "$path" | base64 2>/dev/null | tr -d '\n')
+                size=$(wc -c < "$path")
+                echo "RESP:{\"result\":{\"path\":\"$path\",\"content_b64\":\"$content_b64\",\"size\":$size},\"id\":$req_id}" > /dev/hvc0
+            else
+                echo "RESP:{\"error\":\"File not found: $path\",\"id\":$req_id}" > /dev/hvc0
+            fi
+            ;;
+
+        shutdown)
+            # Kill browser if running
+            [ -n "$BROWSER_PID" ] && kill $BROWSER_PID 2>/dev/null
+            echo "RESP:{\"result\":{\"status\":\"shutting_down\"},\"id\":$req_id}" > /dev/hvc0
+            sync
+            poweroff -f
+            ;;
+
+        *)
+            echo "RESP:{\"error\":\"Unknown method: $method\",\"id\":$req_id}" > /dev/hvc0
+            ;;
+    esac
+done < /dev/hvc0
+
+# Serial console closed
+[ -n "$BROWSER_PID" ] && kill $BROWSER_PID 2>/dev/null
+poweroff -f

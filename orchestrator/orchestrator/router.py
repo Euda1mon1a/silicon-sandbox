@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 from typing import Any
 
@@ -14,18 +15,27 @@ logger = logging.getLogger(__name__)
 LLM_TIMEOUT = 120.0
 
 
-def _get_keychain_secret(key_name: str) -> str:
-    """Retrieve a secret from macOS Keychain."""
+def _get_api_key(key_name: str) -> str:
+    """Retrieve an API key from environment variable or macOS Keychain."""
+    # Prefer environment variable (standard for CI/containers)
+    env_key = key_name.upper().replace("-", "_")
+    env_val = os.environ.get(env_key)
+    if env_val:
+        return env_val
+
+    # Fall back to macOS Keychain
     try:
         result = subprocess.run(
-            ["security", "find-generic-password", "-s", key_name, "-a", "moltbot", "-w"],
+            ["security", "find-generic-password", "-s", key_name, "-w"],
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode == 0:
             return result.stdout.strip()
     except Exception:
         pass
-    raise RuntimeError(f"Could not retrieve keychain secret: {key_name}")
+    raise RuntimeError(
+        f"API key not found. Set {env_key} env var or add '{key_name}' to macOS Keychain."
+    )
 
 
 class ModelRouter:
@@ -37,7 +47,7 @@ class ModelRouter:
 
     def _get_anthropic_key(self) -> str:
         if self._anthropic_key is None:
-            self._anthropic_key = _get_keychain_secret("anthropic-api-key")
+            self._anthropic_key = _get_api_key("anthropic-api-key")
         return self._anthropic_key
 
     def get_model_name(self, role: str) -> str:

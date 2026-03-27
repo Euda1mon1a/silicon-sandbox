@@ -4,8 +4,8 @@ sandbox:
       - "~/.ssh"
       - "~/.gnupg"
       - "~/Library/Keychains"
-      - "~/.openclaw/"
-      - "~/.claude/"
+      # Add your own sensitive directories here:
+      # - "~/.myapp/"
       - "~/.config/git/credentials"
       - "~/.gitconfig"
       - "~/.netrc"
@@ -45,7 +45,7 @@ sandbox:
 engine:
   host: "127.0.0.1"
   port: 8093
-  log_file: "~/.openclaw/logs/silicon-sandbox.log"
+  log_file: "./logs/silicon-sandbox.log"
 
 orchestrator:
   host: "127.0.0.1"
@@ -58,23 +58,24 @@ orchestrator:
     planner:
       provider: anthropic
       model: claude-sonnet-4-20250514
-      api_key_keychain: "anthropic-api-key"
+      # Set ANTHROPIC_API_KEY env var or add "anthropic-api-key" to macOS Keychain
+      api_key_env: "ANTHROPIC_API_KEY"
       role: "Task decomposition and synthesis"
     coder:
       provider: openai_compatible
-      endpoint: "http://127.0.0.1:8080/v1"
-      model: "mlx-community/Qwen3.5-35B-A3B-4bit"
+      endpoint: "http://127.0.0.1:8080/v1"  # Your local LLM (e.g. Ollama, MLX, vLLM)
+      model: "your-local-model"
       api_key: "not-needed"
       role: "Code generation and debugging"
     researcher:
       provider: anthropic
       model: claude-sonnet-4-20250514
-      api_key_keychain: "anthropic-api-key"
+      api_key_env: "ANTHROPIC_API_KEY"
       role: "Web research and analysis"
     fast:
       provider: openai_compatible
-      endpoint: "http://127.0.0.1:8081/v1"
-      model: "phi-4-mini"
+      endpoint: "http://127.0.0.1:8081/v1"  # Lightweight local classifier
+      model: "your-fast-model"
       api_key: "not-needed"
       role: "Quick classification, routing, formatting"
 

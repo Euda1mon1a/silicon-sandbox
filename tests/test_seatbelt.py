@@ -95,7 +95,6 @@ class TestProfileGeneration:
             profile = seatbelt.generate_profile(workspace=ws)
             home = str(Path.home())
             assert f'{home}/.ssh' in profile
-            assert f'{home}/.openclaw' in profile
             assert f'{home}/.claude' in profile
         finally:
             seatbelt.destroy_workspace(ws)
@@ -141,10 +140,10 @@ class TestSeatbeltIsolation:
         finally:
             seatbelt.destroy_workspace(ws)
 
-    def test_read_openclaw_blocked(self):
-        """Sandbox must NOT be able to read ~/.openclaw contents."""
+    def test_read_claude_blocked(self):
+        """Sandbox must NOT be able to read ~/.claude contents."""
         ws, exit_code, stdout, stderr, violations = seatbelt.run(
-            command=f'ls {Path.home()}/.openclaw/ 2>&1',
+            command=f'ls {Path.home()}/.claude/ 2>&1',
             timeout=10,
         )
         try:

@@ -25,6 +25,10 @@ from . import seatbelt, native, microvm
 from .models import (
     CreateSandboxRequest,
     CreateSessionRequest,
+    DesktopBrowserControlRequest,
+    DesktopBrowserOpenRequest,
+    DesktopInputRequest,
+    DesktopScreenshotRequest,
     HealthResponse,
     SandboxInfo,
     SandboxResult,
@@ -109,6 +113,16 @@ def _destroy_session(session_id: str) -> bool:
     if not session or not session.active:
         return False
     session.active = False
+    # Stop MicroVM for Tier B sessions
+    if session.vm is not None:
+        try:
+            session.vm.stop()
+        except Exception:
+            logger.exception("Error stopping MicroVM for session %s", session_id)
+        finally:
+            if session.tier == SandboxTier.B:
+                _monitor.release_vm_memory(session_id)
+            session.vm = None
     if session.workspace and session.workspace.exists():
         seatbelt.destroy_workspace(session.workspace)
     if _proxy:
@@ -586,6 +600,7 @@ async def create_session(req: CreateSessionRequest):
     tier = _resolve_tier(req.tier, needs_linux=req.needs_linux)
 
     # Create workspace
+    vm_instance = None
     if tier == SandboxTier.A:
         workspace = seatbelt.create_workspace()
         profile = seatbelt.generate_profile(
@@ -594,19 +609,55 @@ async def create_session(req: CreateSessionRequest):
         )
         profile_path = seatbelt.write_profile(profile, workspace)
         env = seatbelt.build_env(workspace, req.env or None)
+    elif tier == SandboxTier.B:
+        # MicroVM session — boot a persistent VM
+        if not microvm.is_available(req.image):
+            raise HTTPException(
+                status_code=400,
+                detail=f"MicroVM not available for image '{req.image}'"
+            )
+        if not _monitor.can_allocate_vm(req.memory_gb):
+            raise HTTPException(status_code=429, detail="VM memory budget exceeded")
+
+        _monitor.allocate_vm_memory(session_id, req.memory_gb)
+
+        # Resolve disk image for desktop mode
+        disk_image = None
+        if req.image == "desktop":
+            disk_image = str(microvm._DESKTOP_IMAGE)
+
+        vm_instance = microvm.MicroVM(
+            cpus=req.cpus,
+            memory_gb=req.memory_gb,
+            allow_network=req.allow_network,
+            disk_image=disk_image,
+        )
+        try:
+            vm_instance.start(timeout=30)
+        except Exception as e:
+            _monitor.release_vm_memory(session_id)
+            raise HTTPException(status_code=500, detail=f"Failed to boot MicroVM: {e}")
+
+        workspace = Path("/tmp")  # VM workspace is ephemeral inside VM
+        profile_path = None
+        env = {}
     elif tier == SandboxTier.C:
         workspace = native.create_workspace()
         profile_path = None
         env = native.build_env(workspace, req.env or None)
     else:
-        raise HTTPException(status_code=400, detail="Sessions only support Tier A and C currently")
+        raise HTTPException(status_code=400, detail=f"Unsupported tier: {tier}")
 
-    # Write initial files
+    # Write initial files (Tier A/C: host filesystem; Tier B: via VM RPC)
     if req.files:
-        for filename, content in req.files.items():
-            filepath = workspace / filename
-            filepath.parent.mkdir(parents=True, exist_ok=True)
-            filepath.write_text(content)
+        if tier == SandboxTier.B and vm_instance:
+            for filename, content in req.files.items():
+                vm_instance.write_file(filename, content)
+        else:
+            for filename, content in req.files.items():
+                filepath = workspace / filename
+                filepath.parent.mkdir(parents=True, exist_ok=True)
+                filepath.write_text(content)
 
     # Register per-session allowed domains
     if req.allowed_domains and _proxy:
@@ -619,10 +670,13 @@ async def create_session(req: CreateSessionRequest):
         profile_path=profile_path,
         env=env,
         ttl_seconds=req.ttl_seconds,
+        vm=vm_instance,
+        image=req.image,
     )
     _sessions[session_id] = session
+    _monitor.register_sandbox(session_id, tier.value)
 
-    logger.info("Created session %s (tier=%s, ttl=%ds)", session_id, tier.value, req.ttl_seconds)
+    logger.info("Created session %s (tier=%s, image=%s, ttl=%ds)", session_id, tier.value, req.image, req.ttl_seconds)
     return session.to_info()
 
 
@@ -659,6 +713,16 @@ async def session_exec(session_id: str, req: SessionExecRequest):
         for line in stderr.splitlines():
             if "deny" in line.lower() and ("sandbox" in line.lower() or "seatbelt" in line.lower()):
                 violations.append(line.strip())
+    elif session.tier == SandboxTier.B:
+        if not session.vm:
+            raise HTTPException(status_code=410, detail="MicroVM not running")
+        result = await asyncio.to_thread(
+            session.vm.exec_command, req.command, req.timeout
+        )
+        exit_code = result.get("exit_code", -1)
+        stdout = result.get("stdout", "")
+        stderr = result.get("stderr", "")
+        violations = []
     elif session.tier == SandboxTier.C:
         exit_code, stdout, stderr = await asyncio.to_thread(
             _tracked_native_execute,
@@ -1055,6 +1119,86 @@ async def session_exec_stream(session_id: str, req: SessionExecRequest):
             yield {"event": "error", "data": _json.dumps({"message": str(e)})}
 
     return EventSourceResponse(_stream_generator())
+
+
+# === DESKTOP RPC ENDPOINTS (Tier B desktop VM sessions) ===
+
+
+def _require_desktop_session(session_id: str) -> SessionState:
+    """Validate and return a desktop session, raising appropriate HTTP errors."""
+    session = _sessions.get(session_id)
+    if not session or not session.active:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found or destroyed")
+    if session.tier != SandboxTier.B or session.image != "desktop":
+        raise HTTPException(status_code=400, detail="Desktop RPCs require a Tier B desktop session")
+    if not session.vm:
+        raise HTTPException(status_code=410, detail="MicroVM not running")
+    session.touch()
+    return session
+
+
+@app.post("/session/{session_id}/screenshot", dependencies=[Depends(verify_auth)])
+async def session_screenshot(session_id: str, req: DesktopScreenshotRequest | None = None):
+    """Capture a screenshot of the desktop VM's virtual display.
+
+    Returns dict with image_b64 (base64-encoded PNG), format, size.
+    """
+    session = _require_desktop_session(session_id)
+    fmt = req.format if req else "png"
+    region = req.region if req else None
+    result = await asyncio.to_thread(session.vm.screenshot, fmt, region)
+    return result
+
+
+@app.post("/session/{session_id}/input", dependencies=[Depends(verify_auth)])
+async def session_input(session_id: str, req: DesktopInputRequest):
+    """Inject input into the desktop VM's virtual display.
+
+    Actions: click(x, y), type(text), key(combo), scroll(dx, dy), mousemove(x, y).
+    """
+    session = _require_desktop_session(session_id)
+    kwargs = {}
+    if req.x is not None:
+        kwargs["x"] = req.x
+    if req.y is not None:
+        kwargs["y"] = req.y
+    if req.action == "click":
+        kwargs["button"] = req.button
+    if req.text is not None:
+        kwargs["text"] = req.text
+    if req.combo is not None:
+        kwargs["combo"] = req.combo
+    if req.dx is not None:
+        kwargs["dx"] = req.dx
+    if req.dy is not None:
+        kwargs["dy"] = req.dy
+    result = await asyncio.to_thread(session.vm.input, req.action, **kwargs)
+    return result
+
+
+@app.post("/session/{session_id}/browser", dependencies=[Depends(verify_auth)])
+async def session_browser_open(session_id: str, req: DesktopBrowserOpenRequest | None = None):
+    """Open or navigate Chromium in the desktop VM.
+
+    Returns Chromium PID and status.
+    """
+    session = _require_desktop_session(session_id)
+    url = req.url if req else "about:blank"
+    result = await asyncio.to_thread(session.vm.browser_open, url)
+    return result
+
+
+@app.post("/session/{session_id}/browser/control", dependencies=[Depends(verify_auth)])
+async def session_browser_control(session_id: str, req: DesktopBrowserControlRequest):
+    """Send a Chrome DevTools Protocol (CDP) command to the desktop VM's browser.
+
+    Enables deterministic DOM operations: navigate, extract text, run JS, etc.
+    """
+    session = _require_desktop_session(session_id)
+    result = await asyncio.to_thread(
+        session.vm.browser_control, req.cdp_method, req.cdp_params
+    )
+    return result
 
 
 def main():

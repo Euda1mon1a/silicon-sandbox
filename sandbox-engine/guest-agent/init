@@ -56,10 +56,32 @@ if [ -n "$virtiofs_tags" ]; then
     IFS="$OLD_IFS"
 fi
 
-# === Network Setup ===
-# Load network kernel modules if present (needed for NAT networking)
+# === VirtIO Block Device + ext4 ===
 KVER=$(uname -r)
 MODBASE="/lib/modules/$KVER/kernel"
+
+# Load virtio_blk so /dev/vda is available when a disk image is attached
+# Load ext4 + deps (crc32c, crc16, mbcache, jbd2) so disk images can be mounted/booted
+for mod in \
+    "$MODBASE/drivers/block/virtio_blk.ko" \
+    "$MODBASE/crypto/crc32c_generic.ko" \
+    "$MODBASE/lib/libcrc32c.ko" \
+    "$MODBASE/lib/crc16.ko" \
+    "$MODBASE/fs/mbcache.ko" \
+    "$MODBASE/fs/jbd2/jbd2.ko" \
+    "$MODBASE/fs/ext4/ext4.ko" \
+; do
+    gz="${mod}.gz"
+    if [ -f "$gz" ]; then
+        gunzip -f "$gz" 2>/dev/null
+    fi
+    if [ -f "$mod" ]; then
+        insmod "$mod" 2>/dev/null
+    fi
+done
+
+# === Network Setup ===
+# Load network kernel modules if present (needed for NAT networking)
 # Load modules in dependency order: af_packet (DHCP), failover chain, virtio_net
 for mod in \
     "$MODBASE/net/packet/af_packet.ko" \
@@ -95,6 +117,24 @@ if ip link show eth0 >/dev/null 2>&1; then
         export HTTP_PROXY="$http_proxy_val"
         export HTTPS_PROXY="$http_proxy_val"
         echo "NET: proxy=$http_proxy_val" > /dev/hvc0
+    fi
+fi
+
+# === Disk Boot (auto-detect) ===
+# If /dev/vda exists and has an ext4 filesystem with /sbin/init, switch_root into it.
+# Builder mode starts with empty/unformatted disk — mount will fail, staying in initramfs.
+if [ -b /dev/vda ]; then
+    mkdir -p /newroot
+    mount -t ext4 /dev/vda /newroot 2>/dev/null
+    if [ $? -eq 0 ] && [ -x /newroot/sbin/init ]; then
+        echo "DISK_BOOT: switching to /dev/vda" > /dev/hvc0
+        mount --move /proc /newroot/proc
+        mount --move /sys /newroot/sys
+        mount --move /dev /newroot/dev
+        exec switch_root /newroot /sbin/init
+    else
+        umount /newroot 2>/dev/null
+        rmdir /newroot 2>/dev/null
     fi
 fi
 

@@ -45,6 +45,26 @@ class CreateTaskRequest(BaseModel):
     timeout: int = Field(default=600, ge=30, le=3600)
 
 
+class DirectSubtaskRequest(BaseModel):
+    """A pre-built subtask for direct execution (no LLM decomposition)."""
+    id: str = ""
+    type: SubtaskType = SubtaskType.CODE_EXEC
+    description: str
+    command: str = ""
+    prompt: str = ""
+    model: str = ""
+    sandbox_tier: str = "C"
+    depends_on: list[str] = Field(default_factory=list)
+    timeout: int = Field(default=30, ge=1, le=600)
+
+
+class CreateDirectTaskRequest(BaseModel):
+    """Submit a pre-built subtask DAG without LLM decomposition."""
+    goal: str
+    subtasks: list[DirectSubtaskRequest]
+    timeout: int = Field(default=600, ge=30, le=3600)
+
+
 class SubtaskResult(BaseModel):
     id: str
     type: SubtaskType
@@ -94,6 +114,7 @@ class Subtask:
         command: str = "",
         prompt: str = "",
         inputs: dict[str, Any] | None = None,
+        timeout: int = 30,
     ):
         self.id = subtask_id
         self.type = task_type
@@ -104,6 +125,7 @@ class Subtask:
         self.command = command
         self.prompt = prompt
         self.inputs = inputs or {}
+        self.timeout = timeout
         self.status = SubtaskStatus.PENDING
         self.output = ""
         self.error: str | None = None

@@ -26,8 +26,11 @@ _KERNEL = _PROJECT_ROOT / "config" / "vm-images" / "Image"
 _INITRD = _PROJECT_ROOT / "config" / "vm-images" / "initramfs.cpio.gz"
 
 
-def is_available() -> bool:
-    """Check if MicroVM support is available."""
+_DESKTOP_IMAGE = _PROJECT_ROOT / "config" / "vm-images" / "alpine-desktop.img"
+
+
+def is_available(image: str = "base") -> bool:
+    """Check if MicroVM support is available for the given image type."""
     if not _VM_LAUNCHER.exists():
         logger.debug("vm-launcher binary not found at %s", _VM_LAUNCHER)
         return False
@@ -37,6 +40,10 @@ def is_available() -> bool:
     if not _INITRD.exists():
         logger.debug("Initramfs not found at %s", _INITRD)
         return False
+    if image == "desktop":
+        if not _DESKTOP_IMAGE.exists():
+            logger.debug("Desktop image not found at %s", _DESKTOP_IMAGE)
+            return False
     return True
 
 
@@ -49,11 +56,15 @@ class MicroVM:
         memory_gb: int = 1,
         allow_network: bool = False,
         shared_dirs: list[tuple[str, str]] | None = None,
+        disk_image: str | None = None,
+        boot_from_disk: bool = False,
     ):
         self.cpus = cpus
         self.memory_gb = memory_gb
         self.allow_network = allow_network
         self.shared_dirs = shared_dirs or []  # list of (host_path, guest_tag)
+        self.disk_image = disk_image  # path to .img file (VirtIO block device)
+        self.boot_from_disk = boot_from_disk  # kept for API compat; init auto-detects
         self._process: subprocess.Popen | None = None
         self._ready = threading.Event()
         self._response_lines: list[str] = []
@@ -62,15 +73,30 @@ class MicroVM:
         self._req_counter = 0
 
     def start(self, timeout: float = 15.0) -> None:
-        """Boot the MicroVM and wait for the guest agent to be ready."""
+        """Boot the MicroVM and wait for the guest agent to be ready.
+
+        Boot modes (auto-detected by init script):
+        - No disk_image: initramfs only (standard headless sandbox)
+        - disk_image with empty disk: initramfs + disk attached (builder mode)
+        - disk_image with ext4 + /sbin/init: initramfs → switch_root to disk (desktop mode)
+        """
         cmd = [
             str(_VM_LAUNCHER),
             "boot",
             "--kernel", str(_KERNEL),
-            "--initrd", str(_INITRD),
+        ]
+
+        # Attach disk image if provided
+        if self.disk_image:
+            cmd.extend(["--rootfs", self.disk_image])
+
+        # Always use initramfs (it loads kernel modules, then switch_root for disk boot)
+        cmd.extend(["--initrd", str(_INITRD)])
+
+        cmd.extend([
             "--cpus", str(self.cpus),
             "--memory", str(self.memory_gb),
-        ]
+        ])
         if self.allow_network:
             cmd.append("--allow-net")
 
@@ -198,6 +224,53 @@ class MicroVM:
             raise FileNotFoundError(response["error"])
         return result.get("content", "")
 
+    # --- Desktop RPCs (only available on desktop image) ---
+
+    def screenshot(self, format: str = "png", region: str | None = None) -> dict:
+        """Capture a screenshot of the virtual display.
+
+        Returns dict with 'image_b64' (base64-encoded PNG), 'format', 'size'.
+        """
+        params = {"format": format}
+        if region:
+            params["region"] = region
+        response = self._send_request("screenshot", params, timeout=10)
+        return response.get("result", response)
+
+    def input(self, action: str, **kwargs) -> dict:
+        """Inject input into the virtual display.
+
+        Actions: click(x, y, button=1), type(text), key(combo),
+                 scroll(dx, dy), mousemove(x, y).
+        """
+        params = {"action": action}
+        params.update(kwargs)
+        response = self._send_request("input", params, timeout=5)
+        return response.get("result", response)
+
+    def browser_open(self, url: str = "about:blank") -> dict:
+        """Open or navigate Chromium in the desktop VM."""
+        response = self._send_request("browser_open", {"url": url}, timeout=15)
+        return response.get("result", response)
+
+    def browser_control(self, cdp_method: str, cdp_params: dict | None = None) -> dict:
+        """Send a Chrome DevTools Protocol command."""
+        params = {"cdp_method": cdp_method}
+        if cdp_params:
+            params["cdp_params"] = cdp_params
+        response = self._send_request("browser_control", params, timeout=15)
+        result = response.get("result", response)
+
+        # Decode base64-wrapped CDP result
+        if isinstance(result, dict) and "cdp_result_b64" in result:
+            try:
+                decoded = base64.b64decode(result["cdp_result_b64"]).decode("utf-8", errors="replace")
+                result = json.loads(decoded)
+            except (json.JSONDecodeError, Exception):
+                result["cdp_result_raw"] = decoded
+
+        return result
+
     def shutdown(self) -> None:
         """Ask the guest to shut down gracefully."""
         try:
@@ -237,20 +310,32 @@ def run(
 ) -> tuple[None, int, str, str]:
     """Execute a command in a MicroVM sandbox.
 
+    Args:
+        image: "base" (headless Alpine initramfs) or "desktop" (Xvfb + Chromium disk image).
+
     Returns (workspace, exit_code, stdout, stderr).
-    The workspace is always None for MicroVM (ephemeral, in-RAM).
+    The workspace is always None for MicroVM (ephemeral).
     """
-    if not is_available():
+    if not is_available(image):
         raise RuntimeError(
-            "MicroVM sandbox not available. "
+            f"MicroVM sandbox not available for image '{image}'. "
             "vm-launcher binary not built or VM images not found."
         )
+
+    # Resolve disk image for desktop mode
+    disk_image = None
+    boot_from_disk = False
+    if image == "desktop":
+        disk_image = str(_DESKTOP_IMAGE)
+        boot_from_disk = True
 
     with MicroVM(
         cpus=cpus,
         memory_gb=memory_gb,
         allow_network=allow_network,
         shared_dirs=shared_dirs,
+        disk_image=disk_image,
+        boot_from_disk=boot_from_disk,
     ) as vm:
         # Upload files to workspace
         if files:

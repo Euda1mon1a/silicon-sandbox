@@ -71,7 +71,7 @@ for i in range(len(data) - 2):
                         out.write(result)
                     print(f"Extracted ARM64 Image: {len(result)} bytes")
                     sys.exit(0)
-        except:
+        except Exception:
             continue
 
 print("Error: Could not extract kernel Image")
@@ -109,11 +109,25 @@ if [ ! -f "$INITRD" ] || [ "$1" = "--rebuild" ]; then
         echo "Including kernel modules for $KVER"
         SRC="$APK_TMP/lib/modules/$KVER"
         DST="$BUILD_DIR/lib/modules/$KVER"
-        mkdir -p "$DST/kernel/fs/fuse" "$DST/kernel/drivers/net" "$DST/kernel/net/core" "$DST/kernel/net/packet"
+        mkdir -p "$DST/kernel/fs/fuse" "$DST/kernel/fs/ext4" "$DST/kernel/fs/jbd2" \
+               "$DST/kernel/lib" "$DST/kernel/crypto" \
+               "$DST/kernel/drivers/net" "$DST/kernel/drivers/block" \
+               "$DST/kernel/net/core" "$DST/kernel/net/packet"
 
         # VirtioFS: fuse + virtiofs
         cp "$SRC/kernel/fs/fuse/fuse.ko.gz" "$DST/kernel/fs/fuse/" 2>/dev/null || true
         cp "$SRC/kernel/fs/fuse/virtiofs.ko.gz" "$DST/kernel/fs/fuse/" 2>/dev/null || true
+
+        # ext4 filesystem + dependencies (needed for disk image boot)
+        cp "$SRC/kernel/fs/ext4/ext4.ko.gz" "$DST/kernel/fs/ext4/" 2>/dev/null || true
+        cp "$SRC/kernel/fs/jbd2/jbd2.ko.gz" "$DST/kernel/fs/jbd2/" 2>/dev/null || true
+        cp "$SRC/kernel/fs/mbcache.ko.gz" "$DST/kernel/fs/" 2>/dev/null || true
+        cp "$SRC/kernel/lib/crc16.ko.gz" "$DST/kernel/lib/" 2>/dev/null || true
+        cp "$SRC/kernel/lib/libcrc32c.ko.gz" "$DST/kernel/lib/" 2>/dev/null || true
+        cp "$SRC/kernel/crypto/crc32c_generic.ko.gz" "$DST/kernel/crypto/" 2>/dev/null || true
+
+        # VirtIO block device (needed for disk image boot / builder mode)
+        cp "$SRC/kernel/drivers/block/virtio_blk.ko.gz" "$DST/kernel/drivers/block/" 2>/dev/null || true
 
         # Networking: af_packet (DHCP), failover chain, virtio_net
         cp "$SRC/kernel/net/packet/af_packet.ko.gz" "$DST/kernel/net/packet/" 2>/dev/null || true

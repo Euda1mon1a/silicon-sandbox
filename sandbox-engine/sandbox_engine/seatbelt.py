@@ -40,7 +40,6 @@ def _resolve_denied_paths(
         os.path.realpath(str(home / ".ssh")),
         os.path.realpath(str(home / ".gnupg")),
         os.path.realpath(str(home / "Library" / "Keychains")),
-        os.path.realpath(str(home / ".openclaw")),
         os.path.realpath(str(home / ".claude")),
         os.path.realpath(str(home / ".config" / "git" / "credentials")),
         os.path.realpath(str(home / ".netrc")),

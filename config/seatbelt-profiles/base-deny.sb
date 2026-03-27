@@ -16,7 +16,7 @@
 ;; === SENSITIVE PATHS ===
 ;; Always denied (both read and write):
 ;; ~/.ssh, ~/.gnupg, ~/Library/Keychains
-;; ~/.openclaw/, ~/.claude/
+;; ~/.claude/
 ;; ~/.config/git/credentials, ~/.netrc, ~/.aws
 
 ;; === NETWORK ===

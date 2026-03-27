@@ -84,6 +84,10 @@ class CreateSessionRequest(BaseModel):
     files: dict[str, str] = Field(default_factory=dict)
     ttl_seconds: int = Field(default=3600, ge=60, le=86400)  # 1 min to 24 hours
     needs_linux: bool = False
+    # Tier B (MicroVM) options
+    image: str = "base"  # "base" or "desktop"
+    memory_gb: int = Field(default=2, ge=1, le=8)
+    cpus: int = Field(default=2, ge=1, le=8)
 
 
 class SessionExecRequest(BaseModel):
@@ -101,6 +105,31 @@ class SessionExecResult(BaseModel):
 
 class SessionWriteRequest(BaseModel):
     files: dict[str, str]  # filename -> content
+
+
+class DesktopScreenshotRequest(BaseModel):
+    format: str = "png"
+    region: Optional[str] = None
+
+
+class DesktopInputRequest(BaseModel):
+    action: str  # click, type, key, scroll, mousemove
+    x: Optional[int] = None
+    y: Optional[int] = None
+    button: int = 1
+    text: Optional[str] = None
+    combo: Optional[str] = None
+    dx: Optional[int] = None
+    dy: Optional[int] = None
+
+
+class DesktopBrowserOpenRequest(BaseModel):
+    url: str = "about:blank"
+
+
+class DesktopBrowserControlRequest(BaseModel):
+    cdp_method: str
+    cdp_params: Optional[dict] = None
 
 
 class SessionInfo(BaseModel):
@@ -176,6 +205,8 @@ class SessionState:
         profile_path: Optional[Path],
         env: dict[str, str],
         ttl_seconds: int = 3600,
+        vm: object | None = None,  # MicroVM instance for Tier B
+        image: str = "base",
     ):
         self.id = session_id
         self.tier = tier
@@ -188,6 +219,8 @@ class SessionState:
         self.exec_count = 0
         self.active = True
         self.paused = False
+        self.image = image
+        self.vm = vm  # MicroVM instance (Tier B only)
         self._running_pids: list[int] = []  # PIDs of currently running processes
 
     def touch(self) -> None:

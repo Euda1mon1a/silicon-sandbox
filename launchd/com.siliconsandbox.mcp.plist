@@ -1,22 +1,23 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template: scripts/install.sh replaces $INSTALL_DIR with your actual path -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
     <string>com.siliconsandbox.mcp</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/aaronmontgomerymini/workspace/silicon-sandbox/.venv/bin/python3</string>
-        <string>/Users/aaronmontgomerymini/workspace/silicon-sandbox/tools/sandbox-mcp/server.py</string>
+        <string>$INSTALL_DIR/.venv/bin/python3</string>
+        <string>$INSTALL_DIR/tools/sandbox-mcp/server.py</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>/Users/aaronmontgomerymini/workspace/silicon-sandbox</string>
+    <string>$INSTALL_DIR</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/Users/aaronmontgomerymini/workspace/silicon-sandbox/.venv/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <string>$INSTALL_DIR/.venv/bin:/usr/local/bin:/usr/bin:/bin</string>
         <key>PYTHONPATH</key>
-        <string>/Users/aaronmontgomerymini/workspace/silicon-sandbox</string>
+        <string>$INSTALL_DIR</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
@@ -25,8 +26,8 @@
     <key>ThrottleInterval</key>
     <integer>60</integer>
     <key>StandardOutPath</key>
-    <string>/Users/aaronmontgomerymini/workspace/silicon-sandbox/logs/mcp.out.log</string>
+    <string>$INSTALL_DIR/logs/mcp.out.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/aaronmontgomerymini/workspace/silicon-sandbox/logs/mcp.err.log</string>
+    <string>$INSTALL_DIR/logs/mcp.err.log</string>
 </dict>
 </plist>

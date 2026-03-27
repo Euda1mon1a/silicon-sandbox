@@ -154,13 +154,14 @@ class DAGEngine:
         tier = subtask.sandbox_tier if subtask.sandbox_tier != "none" else "A"
 
         # Call sandbox engine
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        sandbox_timeout = getattr(subtask, "timeout", 30)
+        async with httpx.AsyncClient(timeout=max(sandbox_timeout + 30, 120.0)) as client:
             resp = await client.post(
                 f"{self.sandbox_api}/sandbox",
                 json={
                     "tier": tier,
                     "command": command,
-                    "timeout": 30,
+                    "timeout": sandbox_timeout,
                 },
             )
 
