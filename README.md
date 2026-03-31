@@ -1,8 +1,26 @@
 # SiliconSandbox
 
-> **Archived — not actively maintained.** This project is published as-is. It works, has 246 tests (94% pass rate), and ran in production for a month. PRs and issues are welcome but may not be addressed.
+[![PyPI](https://img.shields.io/pypi/v/silicon-sandbox)](https://pypi.org/project/silicon-sandbox/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://python.org)
+[![macOS](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon-lightgrey.svg)]()
 
 Apple Silicon native AI agent sandbox and orchestration platform. Runs entirely on macOS using native primitives — no Docker, no cloud dependency.
+
+## Install
+
+```bash
+pip install silicon-sandbox          # Engine + SDK
+pip install silicon-sandbox[mcp]     # + MCP server for Claude Code / Cursor
+```
+
+Or run from source:
+
+```bash
+git clone https://github.com/Euda1mon1a/silicon-sandbox.git
+cd silicon-sandbox
+./scripts/install.sh
+```
 
 ## What It Does
 
@@ -41,18 +59,33 @@ MCP Server (:8100) ────────────────────�
 
 ## Quick Start
 
+### From PyPI
+
 ```bash
-# Install dependencies, build vm-launcher, set up LaunchAgents
-./scripts/install.sh
+pip install silicon-sandbox
 
-# Start all services
-./scripts/launch.sh
+# Start the engine
+silicon-sandbox
+# Engine running on http://127.0.0.1:8093
 
-# Verify
+# Start the MCP server (optional, for Claude Code / Cursor)
+pip install silicon-sandbox[mcp]
+silicon-sandbox-mcp
+# MCP server running on http://127.0.0.1:8100
+```
+
+### From Source
+
+```bash
+./scripts/install.sh   # Install deps, build vm-launcher, set up LaunchAgents
+./scripts/launch.sh    # Start all services
+./scripts/stop.sh      # Stop all services
+```
+
+### Verify
+
+```bash
 curl -s http://127.0.0.1:8093/health | python3 -m json.tool
-
-# Stop all services
-./scripts/stop.sh
 ```
 
 ## Usage
@@ -92,9 +125,27 @@ with Session.create() as session:
     print(result.stdout)
 ```
 
-### MCP Tools (Claude Code / AI Agents)
+### MCP Tools (Claude Code / Cursor / AI Agents)
 
-Register in your MCP config. Available tools:
+```bash
+pip install silicon-sandbox[mcp]
+silicon-sandbox-mcp  # Starts on http://127.0.0.1:8100
+```
+
+Add to your Claude Code `~/.claude.json`:
+
+```json
+{
+  "mcpServers": {
+    "silicon-sandbox": {
+      "type": "http",
+      "url": "http://127.0.0.1:8100/mcp"
+    }
+  }
+}
+```
+
+Available tools (11):
 
 - `sandbox_run` — one-shot sandboxed execution
 - `sandbox_health` — engine health check
